@@ -192,7 +192,7 @@ struct MainWindow : QMainWindow {
 - **使用规则**：凡是碰 `this` 的函数，必须紧跟在 hop 到 `tasks.scheduler()` 之后。`lqtexec::then_on(tasks, fn)` 的效果等同于 `continues_on(tasks.scheduler()) | then(fn)`：函数在对象线程上以右值接收衰变后的值。
   - 它用 `let_value` 实现：每次完成时现场构造「hop 再调用」这一段，前驱的值由 `let_value` 保存到这一段结束。
   - 原因是 `repeat` / `repeat_until` 每一轮以 const 左值重新 connect 循环体，而 lexec 的 `continues_on` 在 const connect 时，要把 sender 里的 const 调度器绑定到非 const 引用，编译失败；循环里用 `then_on` 更新界面又是常见写法。
-  - lexec 修复之前（固定的提交仍是 `e032d55`），lqtexec 不在循环可能用到的地方依赖 `continues_on`。
+  - lexec 已在提交 `a2568cc` 修复（尚未推送）。lqtexec 固定的提交仍是 `e032d55`；在它更新之前，lqtexec 不在循环可能用到的地方依赖 `continues_on`。
 - **scope 树**：
   - 构造时往父 scope 里 spawn 一个守护操作。父 scope 请求停止时，守护操作开始收束子 scope；子 scope join 之后，守护操作完成。
   - 父 scope 的 join 因此自然等待所有子 scope，只用到 lexec 的公开 API。

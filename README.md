@@ -107,7 +107,7 @@ cmake --install build/gcc-debug --prefix /opt/lqtexec
 - `wait_signal` 是边沿触发的：start 之前的发射会丢失。多次发射的信号（进度、`readyRead`）用 `SignalChannel` 配合 `lexec::repeat_until`。
 - 不要在某个上下文的线程上对需要该上下文的 sender 调用阻塞的 `lexec::sync_wait`。
 - 碰 QObject 成员的函数应紧跟在 hop 到 `ObjectScope::scheduler()` 之后（或用 `then_on`）。
-- `repeat` / `repeat_until` 的循环体里回到对象线程请用 `then_on`：循环每一轮以 const 左值重新 connect 循环体，lexec 当前的 `continues_on` 不支持这样 connect。
+- `repeat` / `repeat_until` 的循环体里回到对象线程请用 `then_on`：循环每一轮以 const 左值重新 connect 循环体，固定的 lexec 提交 `e032d55` 里的 `continues_on` 不支持这样 connect（lexec 的 `a2568cc` 已修复）。
 
 ## 测试与已知限制
 
