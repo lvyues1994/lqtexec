@@ -1,0 +1,45 @@
+include(FetchContent)
+
+FetchContent_Declare(doctest
+    URL https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz
+    URL_HASH SHA256=174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331)
+set(DOCTEST_WITH_MAIN_IN_STATIC_LIB OFF)
+set(DOCTEST_NO_INSTALL ON)
+FetchContent_MakeAvailable(doctest)
+
+file(GLOB lqtexec_test_sources CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/support/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/support/*.h")
+if(LQTEXEC_SANITIZERS)
+    # Sanitizer runtimes define the global allocation functions the counter replaces.
+    list(FILTER lqtexec_test_sources EXCLUDE REGEX "/(allocation_counter|allocation_test)\\.(cpp|h)$")
+endif()
+add_executable(lqtexec_tests ${lqtexec_test_sources})
+set_target_properties(lqtexec_tests PROPERTIES AUTOMOC ON)
+target_include_directories(lqtexec_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(lqtexec_tests PRIVATE lqtexec::lqtexec lexec::runtime lqtexec_dev doctest::doctest)
+# Defining this with exceptions enabled would switch doctest's exception assertions off.
+target_compile_definitions(lqtexec_tests PRIVATE
+    $<$<BOOL:${LQTEXEC_DISABLE_EXCEPTIONS}>:DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS>)
+if(LQTEXEC_SANITIZERS)
+    target_compile_definitions(lqtexec_tests PRIVATE LQTEXEC_TEST_NO_ALLOCATION_COUNTER)
+endif()
+add_test(NAME lqtexec_tests COMMAND ${LQTEXEC_TEST_LAUNCHER} $<TARGET_FILE:lqtexec_tests>)
+
+# Every public header compiles on its own, twice in a row, and after Qt's headers, whose
+# keyword macros must not break what lqtexec includes.
+file(GLOB_RECURSE lqtexec_public_headers CONFIGURE_DEPENDS
+    RELATIVE "${PROJECT_SOURCE_DIR}/lqtexec/include"
+    "${PROJECT_SOURCE_DIR}/lqtexec/include/lqtexec/*.h")
+set(lqtexec_header_check_sources "")
+foreach(header IN LISTS lqtexec_public_headers)
+    string(MAKE_C_IDENTIFIER "${header}" header_id)
+    set(source "${CMAKE_CURRENT_BINARY_DIR}/header_check/${header_id}.cpp")
+    file(CONFIGURE OUTPUT "${source}" CONTENT "#include <${header}>\n#include <${header}>\n")
+    set(after_qt "${CMAKE_CURRENT_BINARY_DIR}/header_check/${header_id}_after_qt.cpp")
+    file(CONFIGURE OUTPUT "${after_qt}" CONTENT "#include <QtCore>\n#include <${header}>\n")
+    list(APPEND lqtexec_header_check_sources "${source}" "${after_qt}")
+endforeach()
+add_library(lqtexec_header_check OBJECT ${lqtexec_header_check_sources})
+target_link_libraries(lqtexec_header_check PRIVATE lqtexec::lqtexec lqtexec_dev)

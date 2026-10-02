@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [gcc-debug, clang-asan, gcc-noexcept, gcc-debug-qt5, clang-asan-qt5]
+    env:
+      ASAN_OPTIONS: abort_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: lvyues1994/lexec
+          ref: e032d551d53d87209b83d07fd172890461db643b
+          path: .deps/lexec
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-rt-dev cmake ninja-build libtbb-dev \
+            qtbase5-dev qt6-base-dev
+
+      - name: Configure, build and test
+        run: |
+          cmake --version
+          cmake --preset "${{ matrix.preset }}" -DLQTEXEC_LEXEC_SOURCE_DIR="$GITHUB_WORKSPACE/.deps/lexec"
+          cmake --build --preset "${{ matrix.preset }}" --parallel 4
+          ctest --preset "${{ matrix.preset }}" --output-on-failure --no-tests=error

@@ -1,0 +1,148 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "LQTEXEC_BUILD_TESTS": true,
+        "LQTEXEC_LEXEC_SOURCE_DIR": "$env{LQTEXEC_LEXEC_SOURCE_DIR}"
+      }
+    },
+    { "name": "gcc", "hidden": true, "cacheVariables": { "CMAKE_CXX_COMPILER": "g++" } },
+    { "name": "clang", "hidden": true, "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++" } },
+    { "name": "qt6", "hidden": true, "cacheVariables": { "LQTEXEC_QT_MAJOR_VERSION": "6" } },
+    { "name": "qt5", "hidden": true, "cacheVariables": { "LQTEXEC_QT_MAJOR_VERSION": "5" } },
+    {
+      "name": "debug",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "asan",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "LQTEXEC_SANITIZERS": "address,undefined" }
+    },
+    {
+      "name": "tsan",
+      "hidden": true,
+      "inherits": "base",
+      "description": "Tests run with ASLR disabled: GCC's TSan runtime aborts on kernels with high-entropy mmap randomization",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "LQTEXEC_SANITIZERS": "thread",
+        "LQTEXEC_TEST_LAUNCHER": "setarch;-R"
+      }
+    },
+    {
+      "name": "noexcept",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "LQTEXEC_DISABLE_EXCEPTIONS": true }
+    },
+    { "name": "gcc-debug", "inherits": ["gcc", "qt6", "debug"] },
+    { "name": "gcc-release", "inherits": ["gcc", "qt6", "release"] },
+    { "name": "gcc-asan", "inherits": ["gcc", "qt6", "asan"] },
+    { "name": "gcc-tsan", "inherits": ["gcc", "qt6", "tsan"] },
+    { "name": "gcc-noexcept", "inherits": ["gcc", "qt6", "noexcept"] },
+    { "name": "clang-debug", "inherits": ["clang", "qt6", "debug"] },
+    { "name": "clang-asan", "inherits": ["clang", "qt6", "asan"] },
+    { "name": "clang-tsan", "inherits": ["clang", "qt6", "tsan"] },
+    { "name": "gcc-debug-qt5", "inherits": ["gcc", "qt5", "debug"] },
+    { "name": "gcc-noexcept-qt5", "inherits": ["gcc", "qt5", "noexcept"] },
+    { "name": "clang-asan-qt5", "inherits": ["clang", "qt5", "asan"] }
+  ],
+  "buildPresets": [
+    { "name": "gcc-debug", "configurePreset": "gcc-debug" },
+    { "name": "gcc-release", "configurePreset": "gcc-release" },
+    { "name": "gcc-asan", "configurePreset": "gcc-asan" },
+    { "name": "gcc-tsan", "configurePreset": "gcc-tsan" },
+    { "name": "gcc-noexcept", "configurePreset": "gcc-noexcept" },
+    { "name": "clang-debug", "configurePreset": "clang-debug" },
+    { "name": "clang-asan", "configurePreset": "clang-asan" },
+    { "name": "clang-tsan", "configurePreset": "clang-tsan" },
+    { "name": "gcc-debug-qt5", "configurePreset": "gcc-debug-qt5" },
+    { "name": "gcc-noexcept-qt5", "configurePreset": "gcc-noexcept-qt5" },
+    { "name": "clang-asan-qt5", "configurePreset": "clang-asan-qt5" }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "environment": {
+        "QT_QPA_PLATFORM": "offscreen",
+        "UBSAN_OPTIONS": "print_stacktrace=1"
+      }
+    },
+    { "name": "gcc-debug", "inherits": "test-base", "configurePreset": "gcc-debug" },
+    { "name": "gcc-release", "inherits": "test-base", "configurePreset": "gcc-release" },
+    { "name": "gcc-asan", "inherits": "test-base", "configurePreset": "gcc-asan" },
+    { "name": "gcc-tsan", "inherits": "test-base", "configurePreset": "gcc-tsan" },
+    { "name": "gcc-noexcept", "inherits": "test-base", "configurePreset": "gcc-noexcept" },
+    { "name": "clang-debug", "inherits": "test-base", "configurePreset": "clang-debug" },
+    { "name": "clang-asan", "inherits": "test-base", "configurePreset": "clang-asan" },
+    { "name": "clang-tsan", "inherits": "test-base", "configurePreset": "clang-tsan" },
+    { "name": "gcc-debug-qt5", "inherits": "test-base", "configurePreset": "gcc-debug-qt5" },
+    { "name": "gcc-noexcept-qt5", "inherits": "test-base", "configurePreset": "gcc-noexcept-qt5" },
+    { "name": "clang-asan-qt5", "inherits": "test-base", "configurePreset": "clang-asan-qt5" }
+  ],
+  "workflowPresets": [
+    {
+      "name": "gcc-debug",
+      "steps": [
+        { "type": "configure", "name": "gcc-debug" },
+        { "type": "build", "name": "gcc-debug" },
+        { "type": "test", "name": "gcc-debug" }
+      ]
+    },
+    {
+      "name": "gcc-asan",
+      "steps": [
+        { "type": "configure", "name": "gcc-asan" },
+        { "type": "build", "name": "gcc-asan" },
+        { "type": "test", "name": "gcc-asan" }
+      ]
+    },
+    {
+      "name": "clang-asan",
+      "steps": [
+        { "type": "configure", "name": "clang-asan" },
+        { "type": "build", "name": "clang-asan" },
+        { "type": "test", "name": "clang-asan" }
+      ]
+    },
+    {
+      "name": "gcc-debug-qt5",
+      "steps": [
+        { "type": "configure", "name": "gcc-debug-qt5" },
+        { "type": "build", "name": "gcc-debug-qt5" },
+        { "type": "test", "name": "gcc-debug-qt5" }
+      ]
+    },
+    {
+      "name": "clang-asan-qt5",
+      "steps": [
+        { "type": "configure", "name": "clang-asan-qt5" },
+        { "type": "build", "name": "clang-asan-qt5" },
+        { "type": "test", "name": "clang-asan-qt5" }
+      ]
+    }
+  ]
+}
