@@ -48,6 +48,21 @@ int main(int argc, char **argv) {
 
 完整示例见 [examples/console_demo.cpp](examples/console_demo.cpp)，其中用 `ObjectScope` 把工作绑定到一个 QObject 的生命周期。
 
+[examples/widgets_demo](examples/widgets_demo) 是一个 Widgets 程序，把窗口关闭的流程完整走一遍：
+
+- 任务窗口在线程池上逐步计算、回到窗口更新进度；
+- 取消按钮与任务竞争；
+- 运行中关闭窗口，工作随之停止，之后不再触碰它；
+- 保存不会被打断；
+- 关闭主窗口、点 Quit 或按 Ctrl+C，都会先停止工作、等保存排空再退出。
+
+```sh
+./build/gcc-debug/examples/lqtexec_widgets_demo                     # 交互运行
+QT_QPA_PLATFORM=offscreen ./build/gcc-debug/examples/lqtexec_widgets_demo --script --screenshots shots
+```
+
+脚本模式按日志推进、走真实的界面路径，退出后检查关键事件的先后顺序，ctest 也会运行它。
+
 POSIX 程序要让 Ctrl+C 和 SIGTERM 走同一条收束路径时，在 `main` 里最先（早于 `QCoreApplication` 和任何线程）构造 `SignalStop`：
 
 ```cpp
@@ -92,6 +107,7 @@ cmake --install build/gcc-debug --prefix /opt/lqtexec
 - `wait_signal` 是边沿触发的：start 之前的发射会丢失。多次发射的信号（进度、`readyRead`）用 `SignalChannel` 配合 `lexec::repeat_until`。
 - 不要在某个上下文的线程上对需要该上下文的 sender 调用阻塞的 `lexec::sync_wait`。
 - 碰 QObject 成员的函数应紧跟在 hop 到 `ObjectScope::scheduler()` 之后（或用 `then_on`）。
+- `repeat` / `repeat_until` 的循环体里回到对象线程请用 `then_on`：循环每一轮以 const 左值重新 connect 循环体，lexec 当前的 `continues_on` 不支持这样 connect。
 
 ## 测试与已知限制
 
@@ -102,7 +118,8 @@ cmake --install build/gcc-debug --prefix /opt/lqtexec
 - 对象生命周期与收束；
 - 线程池、进程、网络（本地 HTTP 测试服务器）、QFuture 双向互操作；
 - 信号到停止的桥接（单独的程序）；
-- 安装后由独立工程以 `find_package` 消费。
+- 安装后由独立工程以 `find_package` 消费；
+- Widgets 示例的脚本流程（offscreen 平台）。
 
 本地在 Qt 6.8.3 与 Qt 5.15.13 上，以 GCC 13 / Clang 18 的 debug、ASan+UBSan、无异常构建通过。
 

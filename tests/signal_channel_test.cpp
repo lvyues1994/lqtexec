@@ -28,6 +28,10 @@ static_assert(
     std::is_same_v<lexec::completion_signatures_of_t<decltype(std::declval<lqtexec::SignalChannel<Emitter, int, QString const &> &>().next())>,
                    lexec::completion_signatures<lexec::set_value_t(int, QString), lexec::set_stopped_t()>>);
 
+static_assert(std::is_same_v<lqtexec::SignalChannelFor<&Emitter::withInt>, IntChannel>);
+static_assert(std::is_same_v<lqtexec::SignalChannelFor<&QTimer::timeout>,
+                             decltype(lqtexec::SignalChannel{std::declval<QTimer *>(), &QTimer::timeout})>);
+
 // Starts next() and returns the value it completed with, if it did so in start.
 template <class Channel>
 std::optional<int> nextNow(Channel &channel, Completion &completion) {

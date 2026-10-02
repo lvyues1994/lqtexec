@@ -117,6 +117,30 @@ TEST_CASE("then_on runs on the owner's thread while it lives, and is skipped onc
     CHECK(skipped);
 }
 
+TEST_CASE("then_on in a loop body, connected anew each round, moves the values to the function") {
+    auto context = lqtexec::EventLoopContext{};
+    auto worker = lqtexec::EventLoopThread{};
+    auto parent = lexec::counting_scope{};
+    {
+        auto owner = Owner{context.get_scheduler(), parent};
+        auto rounds = 0;
+        auto completion = Completion{};
+        auto op = lexec::connect(lexec::repeat_until(lexec::schedule(worker.get_scheduler()) |
+                                                     lexec::then([]() noexcept { return std::make_unique<int>(7); }) |
+                                                     lqtexec::then_on(owner.tasks,
+                                                                      [&](std::unique_ptr<int> value) noexcept {
+                                                                          owner.value += *value;
+                                                                          return ++rounds == 3;
+                                                                      })),
+                                 recordInto(completion));
+        lexec::start(op);
+        REQUIRE(processEventsUntil([&] { return completion.done(); }));
+        CHECK(completion.outcome == Outcome::value);
+        CHECK(owner.value == 21);
+    }
+    REQUIRE(joinScope(parent));
+}
+
 TEST_CASE("a stop request on the parent tears the child down while the owner lives") {
     auto context = lqtexec::EventLoopContext{};
     auto parent = lexec::counting_scope{};

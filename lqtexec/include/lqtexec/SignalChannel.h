@@ -349,4 +349,21 @@ SignalChannel(Object *, void (Class::*)(SignalArgs...)) -> SignalChannel<Class, 
 template <class Object, class Class, class... SignalArgs>
 SignalChannel(Object *, void (Class::*)(SignalArgs...), ChannelOptions) -> SignalChannel<Class, SignalArgs...>;
 
+namespace detail {
+
+template <class Signal>
+struct SignalChannelOf;
+
+template <class Class, class... SignalArgs>
+struct SignalChannelOf<void (Class::*)(SignalArgs...)> {
+    using type = SignalChannel<Class, SignalArgs...>;
+};
+
+} // namespace detail
+
+// The channel type for a signal, for members: SignalChannelFor<&QTimer::timeout> names what
+// SignalChannel<QTimer, QTimer::QPrivateSignal> cannot, the tag being private.
+template <auto Signal>
+using SignalChannelFor = typename detail::SignalChannelOf<decltype(Signal)>::type;
+
 } // namespace lqtexec

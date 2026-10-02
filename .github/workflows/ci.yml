@@ -44,7 +44,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang libclang-rt-dev cmake ninja-build libtbb-dev \
-            qtbase5-dev qt6-base-dev
+            qtbase5-dev qt6-base-dev qt6-qpa-plugins fonts-dejavu-core
 
       - name: Configure, build and test
         run: |

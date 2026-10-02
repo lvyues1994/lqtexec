@@ -152,6 +152,7 @@ lexec::repeat_until(progress.next() | lexec::then([](qint64 received, qint64 tot
   - 通道销毁时断开连接、清空缓冲，等待者以 `set_stopped` 完成；
   - 通道销毁之后才启动的 `next()` 也以 `set_stopped` 完成。
 - **共享状态**：与 `wait_signal` 同理，slot 可能在 disconnect 返回后才执行，所以缓冲、等待者与锁放在由通道、slot 对象和 `next()` 操作共同持有的共享状态里。
+- **作为成员**：私有信号的通道类型写不出来（`SignalChannel<QTimer, QTimer::QPrivateSignal>` 里的标签是私有的），`SignalChannelFor<&QTimer::timeout>` 从信号推导出它。
 - **停止**：等待中的 `next()` 收到停止请求，在锁内摘下等待者，在请求线程上以 `set_stopped` 完成；之后的发射照常进缓冲，不会丢。注册停止回调期间到达的停止请求只做标记，与定时器相同。
 
 ## ThreadPoolScheduler
@@ -188,7 +189,10 @@ struct MainWindow : QMainWindow {
   - `tasks.scheduler()` 返回的调度器，任务在对象的线程上执行时先看存活标志；对象已死就以 `set_stopped` 完成。
   - 检查和紧随其后的同步 `then` 在同一次事件派发里执行，对象不可能在两者之间析构。这就是 `QObject::connect(src, sig, context, fn)` 中上下文对象的保证，用在 sender 流水线上。
   - 守卫调度器的操作在 start 时与 scope 建立关联，关联不上（scope 已关闭）就以 `set_stopped` 完成；所以它总在状态的生命期内执行。
-- **使用规则**：凡是碰 `this` 的函数，必须紧跟在 hop 到 `tasks.scheduler()` 之后。`lqtexec::then_on(tasks, fn)` 是 `continues_on(tasks.scheduler()) | then(fn)` 的简写。
+- **使用规则**：凡是碰 `this` 的函数，必须紧跟在 hop 到 `tasks.scheduler()` 之后。`lqtexec::then_on(tasks, fn)` 的效果等同于 `continues_on(tasks.scheduler()) | then(fn)`：函数在对象线程上以右值接收衰变后的值。
+  - 它用 `let_value` 实现：每次完成时现场构造「hop 再调用」这一段，前驱的值由 `let_value` 保存到这一段结束。
+  - 原因是 `repeat` / `repeat_until` 每一轮以 const 左值重新 connect 循环体，而 lexec 的 `continues_on` 在 const connect 时，要把 sender 里的 const 调度器绑定到非 const 引用，编译失败；循环里用 `then_on` 更新界面又是常见写法。
+  - lexec 修复之前（固定的提交仍是 `e032d55`），lqtexec 不在循环可能用到的地方依赖 `continues_on`。
 - **scope 树**：
   - 构造时往父 scope 里 spawn 一个守护操作。父 scope 请求停止时，守护操作开始收束子 scope；子 scope join 之后，守护操作完成。
   - 父 scope 的 join 因此自然等待所有子 scope，只用到 lexec 的公开 API。
@@ -302,6 +306,30 @@ lexec::spawn(client.get(QNetworkRequest{url}) | lexec::then([](lqtexec::NetworkR
 - **开发构建的选项不外泄**：编译选项经 `$<BUILD_INTERFACE:lqtexec_dev>` 只作用于本工程（静态库的私有依赖也会出现在导出里）。
 - **测试**：安装、整体搬走安装目录，再以 `find_package` 构建并运行一个独立的消费工程（两次 `find_package`）；只在不带 sanitizer、开启异常的构建里运行，因为消费工程不带本工程的编译选项。
 
+## Widgets 示例
+
+`examples/widgets_demo` 把 `ObjectScope` 与窗口关闭的流程完整走一遍（需要 Qt Widgets，找不到时不构建）。
+
+- **组合根（`main`）**：
+  - 最先构造 `SignalStop`，再构造 `QApplication`，并 `setQuitOnLastWindowClosed(false)`：退出只走停止请求；
+  - 创建 GUI 线程的上下文、应用 scope、日志与计数，注入主窗口；
+  - 最后 `exec_with_scope`。
+- **任务窗口**：
+  - 每个窗口一个 `ObjectScope`（最后一个成员），关闭时立即析构（`WA_DeleteOnClose`）；
+  - 任务的每一步在 `ThreadPoolScheduler`（与 QtConcurrent 共用的全局池）上计算，经 `then_on` 回到窗口更新进度，整个循环是 `repeat_until`；
+  - 取消按钮用 `when_any(任务, wait_signal(取消按钮))` 与任务竞争；
+  - 完成后的保存包在 `unstoppable` 里，关窗口、退出程序都不打断它，退出等它排空；
+  - 窗口可能已经消失之后才执行的回调（`upon_stopped`、保存本身），只使用组合根拥有的日志与计数。
+- **主窗口**：
+  - 关闭事件被忽略，改为请求停止；窗口留着显示「正在关闭、等待保存」，排空后 `main` 才析构它；
+  - 用 `SignalChannelFor<&QTimer::timeout>` 成员（容量 1，处理不过来的 tick 合并）加 `repeat` 做一个「受 scope 管理的心跳」：程序退出时它随 scope 停止；
+  - 状态由普通的 `QTimer` 刷新，所以关闭阶段仍会更新。
+- **脚本模式（`--script`）**：作为可由代理操作的检验工具。
+  - 走真实的界面路径（点击按钮、关闭窗口），按日志推进：三个任务，一个取消，一个在运行中关窗口，第三个保存时关闭主窗口；
+  - 退出后检查日志里的关键事件与先后顺序（包括「窗口析构后再无对它的更新」「关闭请求之后保存才完成」「保存完成之后才排空」）；
+  - `--screenshots DIR` 在途中截图；
+  - ctest 在 offscreen 平台上运行它。Clang 18 的 LeakSanitizer 在这个 Qt 5 GUI 程序退出时扫描主线程会卡住，所以这个测试关闭泄漏检查；库自身的泄漏由单元测试覆盖。
+
 ## 分配
 
 | 位置 | 分配 |
@@ -355,6 +383,7 @@ lqtexec/
   cmake/          lqtexec_dev.cmake（开发构建）、lqtexec_install.cmake 与 lqtexecConfig.cmake.in（安装）
   tests/          doctest；测试入口先建立 QCoreApplication；network/ 含一个本地 HTTP 测试服务器；
                   signal_stop/ 为单独的程序；consumer/ 为安装后的消费工程
+  examples/       console_demo.cpp；widgets_demo/（Qt Widgets，含脚本模式）
   examples/
   docs/
 ```

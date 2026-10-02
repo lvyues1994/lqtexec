@@ -8,8 +8,10 @@
 #include <QThread>
 
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -197,7 +199,8 @@ struct GuardedScheduleOperation {
         GuardedScheduleOperation *op;
     };
 
-    GuardedScheduleOperation(ObjectScopeState *const state_, Rcvr &&rcvr_)
+    GuardedScheduleOperation(ObjectScopeState *const state_, Rcvr &&rcvr_) noexcept(
+        std::is_nothrow_move_constructible_v<Rcvr>)
         : state(state_), rcvr(static_cast<Rcvr &&>(rcvr_)),
           inner(lexec::connect(state_->scheduler.schedule(), InnerReceiver{this})) {}
 
@@ -243,7 +246,7 @@ struct GuardedScheduleSender {
     using completion_signatures = lexec::completion_signatures<lexec::set_value_t(), lexec::set_stopped_t()>;
 
     template <class Rcvr>
-    GuardedScheduleOperation<Rcvr> connect(Rcvr rcvr) const {
+    GuardedScheduleOperation<Rcvr> connect(Rcvr rcvr) const noexcept(std::is_nothrow_move_constructible_v<Rcvr>) {
         return {state, static_cast<Rcvr &&>(rcvr)};
     }
 
@@ -321,27 +324,63 @@ private:
     detail::ObjectScopeStateRef state;
 };
 
-template <class Fn>
-struct ThenOnClosure : lexec::sender_adaptor_closure<ThenOnClosure<Fn>> {
-    template <class Sndr>
-    auto operator()(Sndr &&sndr) && {
-        return lexec::then(lexec::continues_on(static_cast<Sndr &&>(sndr), scheduler), static_cast<Fn &&>(fn));
+namespace detail {
+
+// Calls fn with the values let_value keeps, moved out: each is used once.
+template <class Fn, class... Values>
+struct ThenOnCall {
+    auto operator()() noexcept(std::is_nothrow_invocable_v<Fn &, Values...>) -> std::invoke_result_t<Fn &, Values...> {
+        return call(std::index_sequence_for<Values...>{});
     }
 
-    template <class Sndr>
-    auto operator()(Sndr &&sndr) const & {
-        return lexec::then(lexec::continues_on(static_cast<Sndr &&>(sndr), scheduler), fn);
+    template <std::size_t... Is>
+    auto call(std::index_sequence<Is...>) -> std::invoke_result_t<Fn &, Values...> {
+        return (*fn)(static_cast<Values &&>(*std::get<Is>(values))...);
+    }
+
+    Fn *fn;
+    std::tuple<Values *...> values;
+};
+
+// let_value's second sender: the hop to the owner's thread, then fn there. let_value keeps
+// the values and this function until the hop completes.
+template <class Fn>
+struct ThenOnHop {
+    template <class... Values>
+    auto operator()(Values &...values) noexcept {
+        return lexec::then(lexec::schedule(scheduler), ThenOnCall<Fn, Values...>{&fn, {&values...}});
     }
 
     ObjectScheduler scheduler;
     Fn fn;
 };
 
-// continues_on(scope.scheduler()) | then(fn): fn runs on the owner's thread while the owner
-// lives, and is skipped with set_stopped once it is gone.
+} // namespace detail
+
+template <class Fn>
+struct ThenOnClosure : lexec::sender_adaptor_closure<ThenOnClosure<Fn>> {
+    template <class Sndr>
+    auto operator()(Sndr &&sndr) && {
+        return lexec::let_value(static_cast<Sndr &&>(sndr), detail::ThenOnHop<Fn>{scheduler, static_cast<Fn &&>(fn)});
+    }
+
+    template <class Sndr>
+    auto operator()(Sndr &&sndr) const & {
+        return lexec::let_value(static_cast<Sndr &&>(sndr), detail::ThenOnHop<Fn>{scheduler, fn});
+    }
+
+    ObjectScheduler scheduler;
+    Fn fn;
+};
+
+// As continues_on(scope.scheduler()) | then(fn): fn runs on the owner's thread with the
+// values, moved, while the owner lives, and is skipped with set_stopped once it is gone. Built
+// on let_value, so that loops can connect it anew as an lvalue each round, which lexec's
+// continues_on does not support.
 template <class Sndr, class Fn, std::enable_if_t<lexec::is_sender_v<Sndr>, int> = 0>
 auto then_on(Sndr &&sndr, ObjectScope const &scope, Fn &&fn) {
-    return lexec::then(lexec::continues_on(static_cast<Sndr &&>(sndr), scope.scheduler()), static_cast<Fn &&>(fn));
+    return lexec::let_value(static_cast<Sndr &&>(sndr),
+                            detail::ThenOnHop<std::decay_t<Fn>>{scope.scheduler(), static_cast<Fn &&>(fn)});
 }
 
 template <class Fn>
