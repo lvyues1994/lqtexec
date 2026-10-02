@@ -14,7 +14,7 @@ export CMAKE_PREFIX_PATH=$HOME/Qt/6.8.3/gcc_64   # Qt 6 不在系统路径时
 cmake --workflow --preset gcc-debug
 ```
 
-可用的 preset 为 `{gcc,clang}-{debug,asan,tsan}`、`gcc-release`、`gcc-noexcept`（Qt 6），以及 `gcc-debug-qt5`、`gcc-noexcept-qt5`、`clang-asan-qt5`（Qt 5）。`LQTEXEC_QT_MAJOR_VERSION` 留空时优先 Qt 6。作为子项目使用时链接 `lqtexec::lqtexec`，测试和示例默认关闭。
+可用的 preset 为 `{gcc,clang}-{debug,asan,tsan}`、`gcc-release`、`gcc-noexcept`（Qt 6），以及 `gcc-debug-qt5`、`gcc-noexcept-qt5`、`clang-asan-qt5`（Qt 5）。`LQTEXEC_QT_MAJOR_VERSION` 留空时优先 Qt 6。作为子项目使用时链接 `lqtexec::lqtexec`，网络适配另链 `lqtexec::network`（`LQTEXEC_BUILD_NETWORK=OFF` 可关闭，不再需要 Qt Network）；测试和示例默认关闭。
 
 ## 使用
 
@@ -59,6 +59,8 @@ int main(int argc, char **argv) {
 | `wait_signal(obj, &T::signal)` | 下一次发射的参数（按声明类型，引用转发）；对象为空、被销毁或停止时为 stopped |
 | `SignalChannel{obj, &T::signal, options}` / `channel.next()` | 只连接一次、缓冲多次发射；`next()` 交付最早的一次（衰变复制）；可设容量与溢出策略 |
 | `ThreadPoolScheduler{pool, priority}` | 在 `QThreadPool` 上执行，与 QtConcurrent 共用线程池；停止请求取回排队中的任务 |
+| `run_process(sch, ProcessSpec{...})` | 在调度器线程上运行进程，完成为退出码与输出；无法启动为 `ProcessError`；停止时先 terminate，宽限期后 kill |
+| `NetworkClient{sch, manager}.get/post/put/head/deleteResource/send(...)` | （`lqtexec::network`）start 时发出请求，完成为完整响应或 `NetworkError`（含 HTTP 错误）；停止时 abort |
 | `ObjectScope{owner, sch, parent.get_token()}` | 绑定对象生命周期的 scope；析构不阻塞；父 scope 停止时一并收束 |
 | `scope.scheduler()` / `then_on(scope, fn)` | 回到对象线程，对象已析构则以 stopped 跳过 |
 | `exec_with_scope(app, scope, stop)` | 运行事件循环，停止后排空 scope 再返回退出码 |

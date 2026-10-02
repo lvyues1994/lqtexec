@@ -1,0 +1,7 @@
+add_library(lqtexec_network STATIC src/NetworkClient.cpp)
+add_library(lqtexec::network ALIAS lqtexec_network)
+target_include_directories(lqtexec_network PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+target_link_libraries(lqtexec_network PUBLIC lqtexec::lqtexec Qt::Network)
+if(TARGET lqtexec_dev)
+    target_link_libraries(lqtexec_network PRIVATE lqtexec_dev)
+endif()

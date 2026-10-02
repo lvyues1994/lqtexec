@@ -154,6 +154,46 @@ lexec::repeat_until(progress.next() | lexec::then([](qint64 received, qint64 tot
 - **共享状态**：与 `wait_signal` 同理，slot 可能在 disconnect 返回后才执行，所以缓冲、等待者与锁放在由通道、slot 对象和 `next()` 操作共同持有的共享状态里。
 - **停止**：等待中的 `next()` 收到停止请求，在锁内摘下等待者，在请求线程上以 `set_stopped` 完成；之后的发射照常进缓冲，不会丢。注册停止回调期间到达的停止请求只做标记，与定时器相同。
 
+## 线程亲和操作与领域适配
+
+`QProcess`、`QNetworkReply` 这类对象有线程亲和：只能在所在线程上创建和操作，信号也在那里发出。`detail::AffineOperation` 是它们共用的框架，由显式传入的 `EventLoopScheduler` 决定对象住在哪个线程。
+
+- **两个内嵌的 schedule 操作**：一个负责启动，一个负责停止，都不分配。
+  - start 先注册停止回调，再启动「启动操作」，在上下文线程上 `begin()` 创建对象。
+  - 停止回调只启动「停止操作」，在上下文线程上 `cancel()`（abort、terminate）。
+  - 注册期间同步触发的停止请求，会把「停止操作」排在「启动操作」之前；「启动操作」执行时看到 stop token，直接以 `set_stopped` 完成，不创建对象。
+- **只在上下文线程上完成**：完成时先撤下停止回调，此后「停止操作是否已投递」不再变化；若已投递而还没执行，就等它执行时再完成，所以队列里不会留下指向已完成操作的节点。
+  - 因此适配的三个完成通道都报告这个调度器为完成调度器（上下文销毁时的丢弃除外）。
+- **同步完成**：`begin()` 里的 `QProcess::start()`、`cancel()` 里的 `QNetworkReply::abort()` 都可能在调用内部发出结束信号、完成操作，所以它们是各自函数的最后一步，之后不再访问操作。
+- **释放对象**：完成时断开连接并 `deleteLater()`（此时往往正处在对象自己的信号里）。
+- **上下文销毁时**：仍在排队的「停止操作」被丢弃时调用 `abandon()`，在销毁线程上直接删除对象再以 `set_stopped` 完成。已经开始、又没有停止请求的适配操作，在上下文销毁后不会再收到信号，应由 scope 在销毁上下文之前排空。
+
+### run_process
+
+```cpp
+auto result = lqtexec::run_process(gui, {QStringLiteral("/usr/bin/git"), {QStringLiteral("status")}});
+```
+
+- `ProcessSpec`：程序、参数、工作目录、环境、标准输入、停止时的宽限期。
+- 完成签名：`set_value_t(ProcessResult)`（退出码、退出状态、标准输出与标准错误）、`set_error_t(ProcessError)`（只在无法启动时）、`set_stopped_t()`。
+  - 非零退出码与崩溃（`CrashExit`）都是值，由调用者判断。
+- 标准输入在 `started` 之后写入并关闭写通道，`begin()` 里 `start()` 之后不再访问操作。
+- 停止：先 `terminate()`，宽限期后 `kill()`；kill 定时器以进程为上下文对象，随进程一起消失。
+
+### NetworkClient
+
+```cpp
+auto const client = lqtexec::NetworkClient{gui, manager};
+lexec::spawn(client.get(QNetworkRequest{url}) | lexec::then([](lqtexec::NetworkResponse r) noexcept { ... })
+                 | lexec::upon_error([](lqtexec::NetworkError const &e) noexcept { ... }),
+             scope.get_token());
+```
+
+- 独立的 `lqtexec::network` 目标（Qt::Network）。`NetworkClient` 是调度器与 `QNetworkAccessManager` 的组合，断言两者在同一线程。
+- `get`、`head`、`deleteResource`、`post`、`put`、`send(verb, ...)`，每个 sender 在 start 时才发出请求（惰性，不存在「结束信号在 start 之前已发出」的竞态）；连接信号后若应答已结束，立即处理。
+- 完成签名：`set_value_t(NetworkResponse)`（状态码、最终 URL、响应头、完整的响应体）、`set_error_t(NetworkError)`（含 HTTP 错误的状态码与响应体）、`set_stopped_t()`。响应头名按 Qt 的报告原样给出：Qt 6.7 起为小写。
+- 停止：`abort()`。
+
 ## ThreadPoolScheduler
 
 - `ThreadPoolScheduler{pool, priority}` 把任务交给 `QThreadPool`。它的价值在于与 QtConcurrent 共用一个池，避免两个池超额订阅；纯 CPU 并行仍建议用 lexec 的 `static_thread_pool`。
@@ -226,6 +266,7 @@ int main(int argc, char **argv) {
 | `wait_signal` | 每次 start 一个控制块，加上 Qt 的连接记录与 slot 对象 |
 | `SignalChannel` | 每个通道一次共享状态与两条连接；缓冲按 `std::deque` 增长；`next()` 不分配 |
 | `ThreadPoolScheduler` | 不分配（线程池内部的队列除外） |
+| `run_process` / `NetworkClient` | 跨线程的启动与停止不分配；Qt 对象本身（`QProcess`、`QNetworkReply`）、它们的连接，以及停止进程时的 kill 定时器 |
 | `ObjectScope` | 每个对象一次状态，加上守护操作的 spawn |
 | `exec_with_scope` | 收束时一次排队调用 |
 
@@ -262,9 +303,10 @@ lqtexec/
   cmake/          仅用于自身开发构建的选项
   lqtexec/        核心：lqtexec::lqtexec（STATIC，Qt::Core + lexec::lexec）
     include/lqtexec/  EventLoopContext.h EventLoopScheduler.h EventLoopThread.h WaitSignal.h
-                      SignalChannel.h ObjectScope.h ExecWithScope.h ThreadPoolScheduler.h detail/...
+                      SignalChannel.h ObjectScope.h ExecWithScope.h ThreadPoolScheduler.h Process.h detail/...
     src/
-  tests/          doctest；测试入口先建立 QCoreApplication
+  network/        lqtexec::network（STATIC，Qt::Network）：include/lqtexec/NetworkClient.h
+  tests/          doctest；测试入口先建立 QCoreApplication；network/ 含一个本地 HTTP 测试服务器
   examples/
   docs/
 ```

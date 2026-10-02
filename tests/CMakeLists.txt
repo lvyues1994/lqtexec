@@ -15,10 +15,19 @@ if(LQTEXEC_SANITIZERS)
     # Sanitizer runtimes define the global allocation functions the counter replaces.
     list(FILTER lqtexec_test_sources EXCLUDE REGEX "/(allocation_counter|allocation_test)\\.(cpp|h)$")
 endif()
+if(TARGET lqtexec::network)
+    file(GLOB lqtexec_network_test_sources CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/network/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/network/*.h")
+    list(APPEND lqtexec_test_sources ${lqtexec_network_test_sources})
+endif()
 add_executable(lqtexec_tests ${lqtexec_test_sources})
 set_target_properties(lqtexec_tests PROPERTIES AUTOMOC ON)
 target_include_directories(lqtexec_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(lqtexec_tests PRIVATE lqtexec::lqtexec lexec::runtime lqtexec_dev doctest::doctest)
+if(TARGET lqtexec::network)
+    target_link_libraries(lqtexec_tests PRIVATE lqtexec::network)
+endif()
 # Defining this with exceptions enabled would switch doctest's exception assertions off.
 target_compile_definitions(lqtexec_tests PRIVATE
     $<$<BOOL:${LQTEXEC_DISABLE_EXCEPTIONS}>:DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS>)
@@ -32,6 +41,12 @@ add_test(NAME lqtexec_tests COMMAND ${LQTEXEC_TEST_LAUNCHER} $<TARGET_FILE:lqtex
 file(GLOB_RECURSE lqtexec_public_headers CONFIGURE_DEPENDS
     RELATIVE "${PROJECT_SOURCE_DIR}/lqtexec/include"
     "${PROJECT_SOURCE_DIR}/lqtexec/include/lqtexec/*.h")
+if(TARGET lqtexec::network)
+    file(GLOB_RECURSE lqtexec_network_headers CONFIGURE_DEPENDS
+        RELATIVE "${PROJECT_SOURCE_DIR}/network/include"
+        "${PROJECT_SOURCE_DIR}/network/include/lqtexec/*.h")
+    list(APPEND lqtexec_public_headers ${lqtexec_network_headers})
+endif()
 set(lqtexec_header_check_sources "")
 foreach(header IN LISTS lqtexec_public_headers)
     string(MAKE_C_IDENTIFIER "${header}" header_id)
@@ -43,3 +58,6 @@ foreach(header IN LISTS lqtexec_public_headers)
 endforeach()
 add_library(lqtexec_header_check OBJECT ${lqtexec_header_check_sources})
 target_link_libraries(lqtexec_header_check PRIVATE lqtexec::lqtexec lqtexec_dev)
+if(TARGET lqtexec::network)
+    target_link_libraries(lqtexec_header_check PRIVATE lqtexec::network)
+endif()
