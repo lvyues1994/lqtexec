@@ -31,10 +31,11 @@ lqtexec 只做适配，不重复 lexec 的算法：`then`、`let_value`、`when_
 
 1. **`EventLoopContext`（执行资源）**：把 lexec 的侵入式任务模型接到某个线程的 Qt 事件循环上：任务队列、唤醒事件、截止时间堆。不可移动，由组合根持有。`EventLoopThread` 是「`QThread` + `EventLoopContext`」的 RAII 组合。
 2. **`EventLoopScheduler`（值句柄）**：`schedule()`、`schedule_after(duration)`、`schedule_at(time_point)`。
-3. **`wait_signal`**：把一次信号发射变成一个 sender。
+3. **信号**：`wait_signal` 把一次信号发射变成一个 sender；`SignalChannel` 只连接一次、缓冲多次发射，`next()` 逐个交付。
 4. **生命周期**：`ObjectScope` 把一个 `counting_scope` 绑到对象的生命周期上；`exec_with_scope` 负责应用收束。
+5. **`ThreadPoolScheduler`**：把任务交给 `QThreadPool`。
 
-之后的阶段在 2、3 之上加领域适配（network、process、QFuture），各自是独立的 CMake 目标。
+之后的阶段在这些模块之上加领域适配（process、network）和边界工具（QFuture、Unix 信号）；依赖 Qt::Core 之外模块的部分是独立的 CMake 目标。
 
 ## 不变量
 
@@ -128,7 +129,39 @@ auto clicked = lqtexec::wait_signal(button, &QPushButton::clicked);  // set_valu
 - **分配**：每次 start 有一个控制块，加上 Qt 自己的分配（两条连接记录、两个 slot 对象）。
 - **局限**：
   - 边沿触发：start 之前的发射会丢。需要「检查状态再等待」的场景（`QNetworkReply`、`QProcess`），由之后阶段的领域适配在 start 里创建资源来解决。
-  - 多次发射的信号不能用 `repeat` 加 `wait_signal`：循环一旦跨线程，两轮之间的发射就会丢；Qt 也不会把正在进行的发射投递给发射期间新建的连接（源码中的 `highestConnectionId`）。这类场景需要只连接一次、带缓冲的 `SignalChannel`，放在后续阶段。
+  - 多次发射的信号不能用 `repeat` 加 `wait_signal`：循环一旦跨线程，两轮之间的发射就会丢；Qt 也不会把正在进行的发射投递给发射期间新建的连接（源码中的 `highestConnectionId`）。这类场景用 `SignalChannel`。
+
+## SignalChannel
+
+```cpp
+auto progress = lqtexec::SignalChannel{reply, &QNetworkReply::downloadProgress};
+lexec::repeat_until(progress.next() | lexec::then([](qint64 received, qint64 total) noexcept {
+    return received == total;
+}));
+```
+
+- **只连接一次**：构造时连接信号和 `destroyed`，之后每次发射都衰变复制进缓冲。`next()` 返回一个 sender，交付最早的一次发射。
+- **完成签名**：`set_value_t(std::decay_t<Args>...)`、`set_stopped_t()`，没有错误通道：复制发射的值失败（内存不足）时丢弃这次发射。
+- **交付**：
+  - start 时缓冲非空，就同步取出并完成；
+  - 否则排队成为等待者，由下一次发射在发射线程上直接交付；
+  - 多个等待者按排队顺序各得一次发射。
+- **容量**：默认不限。设了容量时，满了按 `ChannelOverflow::dropOldest`（保留最新的，适合进度、状态类信号）或 `dropNewest` 处理。
+- **结束**：
+  - 对象销毁后，缓冲里的发射照常交付，交付完以 `set_stopped` 完成；
+  - 通道销毁时断开连接、清空缓冲，等待者以 `set_stopped` 完成；
+  - 通道销毁之后才启动的 `next()` 也以 `set_stopped` 完成。
+- **共享状态**：与 `wait_signal` 同理，slot 可能在 disconnect 返回后才执行，所以缓冲、等待者与锁放在由通道、slot 对象和 `next()` 操作共同持有的共享状态里。
+- **停止**：等待中的 `next()` 收到停止请求，在锁内摘下等待者，在请求线程上以 `set_stopped` 完成；之后的发射照常进缓冲，不会丢。注册停止回调期间到达的停止请求只做标记，与定时器相同。
+
+## ThreadPoolScheduler
+
+- `ThreadPoolScheduler{pool, priority}` 把任务交给 `QThreadPool`。它的价值在于与 QtConcurrent 共用一个池，避免两个池超额订阅；纯 CPU 并行仍建议用 lexec 的 `static_thread_pool`。
+- **不分配**：op state 就是 `QRunnable`，`setAutoDelete(false)`，`QThreadPool::start(op, priority)` 不分配；之所以允许在完成时销毁 op，是因为 5.15 与 6.8 都在 `run()` 之前读取 `autoDelete()`，6.8 的源码注释写明了这一点。
+- **停止**：先注册停止回调，再交给线程池。回调里 `tryTake(op)` 成功说明还在排队，直接在请求线程上以 `set_stopped` 完成；否则任务已在执行或即将执行，执行时检查 stop token。
+  - 注册期间同步触发的回调，因为还没入队，`tryTake` 返回 false，什么也不做。
+  - `tryTake` 文档提到的 ABA 问题只出现在自动删除的任务上；这里的回调只在操作完成之前执行，地址不会被复用。
+- **完成签名**：`set_value_t()`、`set_stopped_t()`，只为 value 报告完成调度器。按线程池与优先级比较相等。
 
 ## ObjectScope
 
@@ -191,6 +224,8 @@ int main(int argc, char **argv) {
 | --- | --- |
 | `schedule()`、定时器 | 操作本身不分配；每批任务至多两个唤醒事件（入队时一个，派发时为剩余任务一个） |
 | `wait_signal` | 每次 start 一个控制块，加上 Qt 的连接记录与 slot 对象 |
+| `SignalChannel` | 每个通道一次共享状态与两条连接；缓冲按 `std::deque` 增长；`next()` 不分配 |
+| `ThreadPoolScheduler` | 不分配（线程池内部的队列除外） |
 | `ObjectScope` | 每个对象一次状态，加上守护操作的 spawn |
 | `exec_with_scope` | 收束时一次排队调用 |
 
@@ -227,7 +262,7 @@ lqtexec/
   cmake/          仅用于自身开发构建的选项
   lqtexec/        核心：lqtexec::lqtexec（STATIC，Qt::Core + lexec::lexec）
     include/lqtexec/  EventLoopContext.h EventLoopScheduler.h EventLoopThread.h WaitSignal.h
-                      ObjectScope.h ExecWithScope.h detail/...
+                      SignalChannel.h ObjectScope.h ExecWithScope.h ThreadPoolScheduler.h detail/...
     src/
   tests/          doctest；测试入口先建立 QCoreApplication
   examples/
@@ -273,7 +308,28 @@ lqtexec/
   - 父 scope 已关闭时子 scope 不接受工作；
   - `exec_with_scope` 的停止驱动退出、直接 `quit()` 兜底、`exec()` 前已请求停止。
 
-**之后**：`ThreadPoolScheduler`（op state 即 `QRunnable`，`setAutoDelete(false)`，`tryTake` 取消；5.15 与 6.8 都在 `run()` 之前读取 `autoDelete()`）、network 与 process 适配、`SignalChannel`、QFuture 互操作（先 Qt 6）、Unix 信号到停止的桥接、安装导出。
+**阶段 3：核心扩展**
+
+- 内容：`ThreadPoolScheduler`、`SignalChannel`。
+- 验收：
+  - 线程池任务在池线程上完成；排队中的任务被停止时立即以 `set_stopped` 完成；停止与执行竞争时恰好完成一次；
+  - 通道按发射顺序交付，start 时有缓冲就同步完成；容量与溢出策略；对象销毁后先交付缓冲再停止；通道销毁时等待者以 `set_stopped` 完成；
+  - 四个线程同时发射、`repeat_until` 消费时，一个发射也不丢。
+
+**阶段 4：领域适配**
+
+- 内容：线程亲和操作框架、`run_process`、`NetworkClient`（`lqtexec::network`）。
+- 验收：
+  - 进程的输出、退出码、启动失败、停止（先 terminate，宽限期后 kill）；从其他线程启动与停止；
+  - 网络请求对本地测试服务器的成功、HTTP 错误、连接失败与停止（abort）；从其他线程启动与停止。
+
+**阶段 5：边界工具**
+
+- 内容：`from_future` / `to_future`、`SignalStop`、安装与 CMake 包导出。
+- 验收：
+  - QFuture 的结果、异常、取消双向映射；
+  - SIGINT / SIGTERM 请求停止；
+  - 安装后的包能被独立的消费工程以 `find_package` 使用。
 
 ## 风险
 

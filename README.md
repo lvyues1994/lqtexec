@@ -57,6 +57,8 @@ int main(int argc, char **argv) {
 | `lexec::schedule(sch)` | 在该事件循环上异步完成；完成为 value 或 stopped |
 | `schedule_after(sch, duration)` / `schedule_at(sch, time_point)` | `steady_clock` 定时器；停止请求立即以 stopped 完成 |
 | `wait_signal(obj, &T::signal)` | 下一次发射的参数（按声明类型，引用转发）；对象为空、被销毁或停止时为 stopped |
+| `SignalChannel{obj, &T::signal, options}` / `channel.next()` | 只连接一次、缓冲多次发射；`next()` 交付最早的一次（衰变复制）；可设容量与溢出策略 |
+| `ThreadPoolScheduler{pool, priority}` | 在 `QThreadPool` 上执行，与 QtConcurrent 共用线程池；停止请求取回排队中的任务 |
 | `ObjectScope{owner, sch, parent.get_token()}` | 绑定对象生命周期的 scope；析构不阻塞；父 scope 停止时一并收束 |
 | `scope.scheduler()` / `then_on(scope, fn)` | 回到对象线程，对象已析构则以 stopped 跳过 |
 | `exec_with_scope(app, scope, stop)` | 运行事件循环，停止后排空 scope 再返回退出码 |
@@ -64,7 +66,7 @@ int main(int argc, char **argv) {
 使用要点：
 
 - `spawn` 只接受错误已处理的工作；开启异常时 `wait_signal` 与跨线程 hop 都可能报告 `exception_ptr`，用 `upon_error` 处理。
-- `wait_signal` 是边沿触发的：start 之前的发射会丢失。
+- `wait_signal` 是边沿触发的：start 之前的发射会丢失。多次发射的信号（进度、`readyRead`）用 `SignalChannel` 配合 `lexec::repeat_until`。
 - 不要在某个上下文的线程上对需要该上下文的 sender 调用阻塞的 `lexec::sync_wait`。
 - 碰 QObject 成员的函数应紧跟在 hop 到 `ObjectScope::scheduler()` 之后（或用 `then_on`）。
 
