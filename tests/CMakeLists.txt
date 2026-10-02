@@ -36,6 +36,29 @@ if(LQTEXEC_SANITIZERS)
 endif()
 add_test(NAME lqtexec_tests COMMAND ${LQTEXEC_TEST_LAUNCHER} $<TARGET_FILE:lqtexec_tests>)
 
+# A program of its own: SignalStop must exist before any other thread.
+if(UNIX)
+    add_executable(lqtexec_signal_stop_test signal_stop/signal_stop_main.cpp)
+    target_link_libraries(lqtexec_signal_stop_test PRIVATE lqtexec::lqtexec lqtexec_dev)
+    add_test(NAME lqtexec_signal_stop COMMAND ${LQTEXEC_TEST_LAUNCHER} $<TARGET_FILE:lqtexec_signal_stop_test>)
+    set_tests_properties(lqtexec_signal_stop PROPERTIES TIMEOUT 30)
+endif()
+
+# The consumer builds without this project's flags, so only plain builds can link it.
+if(LQTEXEC_INSTALL AND NOT LQTEXEC_SANITIZERS AND NOT LQTEXEC_DISABLE_EXCEPTIONS)
+    add_test(NAME lqtexec_installed_package
+        COMMAND ${CMAKE_COMMAND}
+            "-DLQTEXEC_BUILD_DIR=${PROJECT_BINARY_DIR}"
+            "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/package"
+            "-DCONSUMER_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/consumer"
+            "-DQT_DIR_VARIABLE=${lqtexec_qt}_DIR"
+            "-DQT_DIR=${${lqtexec_qt}_DIR}"
+            "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            "-DGENERATOR=${CMAKE_GENERATOR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/consumer/check_package.cmake")
+    set_tests_properties(lqtexec_installed_package PROPERTIES TIMEOUT 300)
+endif()
+
 # Every public header compiles on its own, twice in a row, and after Qt's headers, whose
 # keyword macros must not break what lqtexec includes.
 file(GLOB_RECURSE lqtexec_public_headers CONFIGURE_DEPENDS

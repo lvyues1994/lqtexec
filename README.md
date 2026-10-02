@@ -48,6 +48,24 @@ int main(int argc, char **argv) {
 
 完整示例见 [examples/console_demo.cpp](examples/console_demo.cpp)，其中用 `ObjectScope` 把工作绑定到一个 QObject 的生命周期。
 
+POSIX 程序要让 Ctrl+C 和 SIGTERM 走同一条收束路径时，在 `main` 里最先（早于 `QCoreApplication` 和任何线程）构造 `SignalStop`：
+
+```cpp
+auto stop = lexec::inplace_stop_source{};
+auto const signalStop = lqtexec::SignalStop{stop};   // 不要命名为 signals：那是 Qt 的关键字宏
+auto app = QCoreApplication{argc, argv};
+// ……创建上下文、scope 与工作……
+return lqtexec::exec_with_scope(app, scope, stop);
+```
+
+## 安装
+
+```sh
+cmake --install build/gcc-debug --prefix /opt/lqtexec
+```
+
+消费方把安装前缀加入 `CMAKE_PREFIX_PATH`，然后 `find_package(lqtexec CONFIG REQUIRED)`，链接 `lqtexec::lqtexec`（以及 `lqtexec::network`）。安装目录可以整体搬移。lexec 在本工程里从源码构建时，其头文件随包安装在 `include/lqtexec/vendor`；消费方若已提供 `lexec::lexec`，包会改用它。
+
 ## API
 
 | 入口 | 行为 |
@@ -61,6 +79,9 @@ int main(int argc, char **argv) {
 | `ThreadPoolScheduler{pool, priority}` | 在 `QThreadPool` 上执行，与 QtConcurrent 共用线程池；停止请求取回排队中的任务 |
 | `run_process(sch, ProcessSpec{...})` | 在调度器线程上运行进程，完成为退出码与输出；无法启动为 `ProcessError`；停止时先 terminate，宽限期后 kill |
 | `NetworkClient{sch, manager}.get/post/put/head/deleteResource/send(...)` | （`lqtexec::network`）start 时发出请求，完成为完整响应或 `NetworkError`（含 HTTP 错误）；停止时 abort |
+| `from_future(sch, future)` | 在调度器线程上等待 `QFuture`：结果、异常（`exception_ptr`）、取消（stopped）；停止只停止等待 |
+| `to_future(sndr, scope.get_token())` | 把 sender spawn 进 scope，返回 `QFuture<T>`；scope 不接受时 future 为已取消；取消 future 不停止工作 |
+| `SignalStop{stop}` | （POSIX）把 SIGINT / SIGTERM 变成 `stop.request_stop()`；在 `main` 最开始构造 |
 | `ObjectScope{owner, sch, parent.get_token()}` | 绑定对象生命周期的 scope；析构不阻塞；父 scope 停止时一并收束 |
 | `scope.scheduler()` / `then_on(scope, fn)` | 回到对象线程，对象已析构则以 stopped 跳过 |
 | `exec_with_scope(app, scope, stop)` | 运行事件循环，停止后排空 scope 再返回退出码 |
@@ -74,6 +95,17 @@ int main(int argc, char **argv) {
 
 ## 测试与已知限制
 
-测试覆盖调度顺序、嵌套事件循环、定时器、跨线程的恰好一次完成、对象生命周期与收束。本地在 Qt 6.8.3 与 Qt 5.15.13 上以 GCC 13 / Clang 18 的 debug、ASan+UBSan、无异常构建通过。
+测试覆盖：
+
+- 调度顺序、嵌套事件循环、定时器；
+- 跨线程的恰好一次完成、信号通道不丢发射；
+- 对象生命周期与收束；
+- 线程池、进程、网络（本地 HTTP 测试服务器）、QFuture 双向互操作；
+- 信号到停止的桥接（单独的程序）；
+- 安装后由独立工程以 `find_package` 消费。
+
+本地在 Qt 6.8.3 与 Qt 5.15.13 上，以 GCC 13 / Clang 18 的 debug、ASan+UBSan、无异常构建通过。
+
+进程测试需要能向子进程发送信号；在禁止 `kill` 的沙箱里，停止进程的两个测试会超时。
 
 TSan 下测试全部通过，但会报告来自 Qt 与 glib 内部同步的数据竞争（投递事件队列的互斥锁、连接表的 relaxed 发布、slot 对象的引用计数），因为发行版的 Qt 没有 TSan 插桩。可靠的 TSan 验证需要用 TSan 编译的 Qt。

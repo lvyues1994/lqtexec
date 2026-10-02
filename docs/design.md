@@ -34,8 +34,8 @@ lqtexec 只做适配，不重复 lexec 的算法：`then`、`let_value`、`when_
 3. **信号**：`wait_signal` 把一次信号发射变成一个 sender；`SignalChannel` 只连接一次、缓冲多次发射，`next()` 逐个交付。
 4. **生命周期**：`ObjectScope` 把一个 `counting_scope` 绑到对象的生命周期上；`exec_with_scope` 负责应用收束。
 5. **`ThreadPoolScheduler`**：把任务交给 `QThreadPool`。
-
-之后的阶段在这些模块之上加领域适配（process、network）和边界工具（QFuture、Unix 信号）；依赖 Qt::Core 之外模块的部分是独立的 CMake 目标。
+6. **领域适配**：线程亲和操作框架，以及其上的 `run_process` 和 `NetworkClient`（独立的 `lqtexec::network` 目标，依赖 Qt::Network）。
+7. **边界工具**：`from_future` / `to_future`、`SignalStop`。
 
 ## 不变量
 
@@ -154,46 +154,6 @@ lexec::repeat_until(progress.next() | lexec::then([](qint64 received, qint64 tot
 - **共享状态**：与 `wait_signal` 同理，slot 可能在 disconnect 返回后才执行，所以缓冲、等待者与锁放在由通道、slot 对象和 `next()` 操作共同持有的共享状态里。
 - **停止**：等待中的 `next()` 收到停止请求，在锁内摘下等待者，在请求线程上以 `set_stopped` 完成；之后的发射照常进缓冲，不会丢。注册停止回调期间到达的停止请求只做标记，与定时器相同。
 
-## 线程亲和操作与领域适配
-
-`QProcess`、`QNetworkReply` 这类对象有线程亲和：只能在所在线程上创建和操作，信号也在那里发出。`detail::AffineOperation` 是它们共用的框架，由显式传入的 `EventLoopScheduler` 决定对象住在哪个线程。
-
-- **两个内嵌的 schedule 操作**：一个负责启动，一个负责停止，都不分配。
-  - start 先注册停止回调，再启动「启动操作」，在上下文线程上 `begin()` 创建对象。
-  - 停止回调只启动「停止操作」，在上下文线程上 `cancel()`（abort、terminate）。
-  - 注册期间同步触发的停止请求，会把「停止操作」排在「启动操作」之前；「启动操作」执行时看到 stop token，直接以 `set_stopped` 完成，不创建对象。
-- **只在上下文线程上完成**：完成时先撤下停止回调，此后「停止操作是否已投递」不再变化；若已投递而还没执行，就等它执行时再完成，所以队列里不会留下指向已完成操作的节点。
-  - 因此适配的三个完成通道都报告这个调度器为完成调度器（上下文销毁时的丢弃除外）。
-- **同步完成**：`begin()` 里的 `QProcess::start()`、`cancel()` 里的 `QNetworkReply::abort()` 都可能在调用内部发出结束信号、完成操作，所以它们是各自函数的最后一步，之后不再访问操作。
-- **释放对象**：完成时断开连接并 `deleteLater()`（此时往往正处在对象自己的信号里）。
-- **上下文销毁时**：仍在排队的「停止操作」被丢弃时调用 `abandon()`，在销毁线程上直接删除对象再以 `set_stopped` 完成。已经开始、又没有停止请求的适配操作，在上下文销毁后不会再收到信号，应由 scope 在销毁上下文之前排空。
-
-### run_process
-
-```cpp
-auto result = lqtexec::run_process(gui, {QStringLiteral("/usr/bin/git"), {QStringLiteral("status")}});
-```
-
-- `ProcessSpec`：程序、参数、工作目录、环境、标准输入、停止时的宽限期。
-- 完成签名：`set_value_t(ProcessResult)`（退出码、退出状态、标准输出与标准错误）、`set_error_t(ProcessError)`（只在无法启动时）、`set_stopped_t()`。
-  - 非零退出码与崩溃（`CrashExit`）都是值，由调用者判断。
-- 标准输入在 `started` 之后写入并关闭写通道，`begin()` 里 `start()` 之后不再访问操作。
-- 停止：先 `terminate()`，宽限期后 `kill()`；kill 定时器以进程为上下文对象，随进程一起消失。
-
-### NetworkClient
-
-```cpp
-auto const client = lqtexec::NetworkClient{gui, manager};
-lexec::spawn(client.get(QNetworkRequest{url}) | lexec::then([](lqtexec::NetworkResponse r) noexcept { ... })
-                 | lexec::upon_error([](lqtexec::NetworkError const &e) noexcept { ... }),
-             scope.get_token());
-```
-
-- 独立的 `lqtexec::network` 目标（Qt::Network）。`NetworkClient` 是调度器与 `QNetworkAccessManager` 的组合，断言两者在同一线程。
-- `get`、`head`、`deleteResource`、`post`、`put`、`send(verb, ...)`，每个 sender 在 start 时才发出请求（惰性，不存在「结束信号在 start 之前已发出」的竞态）；连接信号后若应答已结束，立即处理。
-- 完成签名：`set_value_t(NetworkResponse)`（状态码、最终 URL、响应头、完整的响应体）、`set_error_t(NetworkError)`（含 HTTP 错误的状态码与响应体）、`set_stopped_t()`。响应头名按 Qt 的报告原样给出：Qt 6.7 起为小写。
-- 停止：`abort()`。
-
 ## ThreadPoolScheduler
 
 - `ThreadPoolScheduler{pool, priority}` 把任务交给 `QThreadPool`。它的价值在于与 QtConcurrent 共用一个池，避免两个池超额订阅；纯 CPU 并行仍建议用 lexec 的 `static_thread_pool`。
@@ -258,6 +218,90 @@ int main(int argc, char **argv) {
 - **析构顺序**：有 scope 树，`exec_with_scope` 返回时所有窗口的工作都已排空，main 末尾析构窗口时 `ObjectScope` 的析构是空操作。
 - **核心只依赖 Qt::Core**：所以 `QGuiApplication::lastWindowClosed` 到 `request_stop` 的接线由应用自己完成。
 
+## 线程亲和操作与领域适配
+
+`QProcess`、`QNetworkReply` 这类对象有线程亲和：只能在所在线程上创建和操作，信号也在那里发出。`detail::AffineOperation` 是它们共用的框架，由显式传入的 `EventLoopScheduler` 决定对象住在哪个线程。
+
+- **两个内嵌的 schedule 操作**：一个负责启动，一个负责停止，都不分配。
+  - start 先注册停止回调，再启动「启动操作」，在上下文线程上 `begin()` 创建对象。
+  - 停止回调只启动「停止操作」，在上下文线程上 `cancel()`（abort、terminate）。
+  - 注册期间同步触发的停止请求，会把「停止操作」排在「启动操作」之前；「启动操作」执行时看到 stop token，直接以 `set_stopped` 完成，不创建对象。
+- **只在上下文线程上完成**：完成时先撤下停止回调，此后「停止操作是否已投递」不再变化；若已投递而还没执行，就等它执行时再完成，所以队列里不会留下指向已完成操作的节点。
+  - 因此适配的三个完成通道都报告这个调度器为完成调度器（上下文销毁时的丢弃除外）。
+- **同步完成**：`begin()` 里的 `QProcess::start()`、`cancel()` 里的 `QNetworkReply::abort()` 都可能在调用内部发出结束信号、完成操作，所以它们是各自函数的最后一步，之后不再访问操作。
+- **释放对象**：完成时断开连接并 `deleteLater()`（此时往往正处在对象自己的信号里）。
+- **上下文销毁时**：仍在排队的「停止操作」被丢弃时调用 `abandon()`，在销毁线程上直接删除对象再以 `set_stopped` 完成。已经开始、又没有停止请求的适配操作，在上下文销毁后不会再收到信号，应由 scope 在销毁上下文之前排空。
+
+### run_process
+
+```cpp
+auto result = lqtexec::run_process(gui, {QStringLiteral("/usr/bin/git"), {QStringLiteral("status")}});
+```
+
+- `ProcessSpec`：程序、参数、工作目录、环境、标准输入、停止时的宽限期。
+- 完成签名：`set_value_t(ProcessResult)`（退出码、退出状态、标准输出与标准错误）、`set_error_t(ProcessError)`（只在无法启动时）、`set_stopped_t()`。
+  - 非零退出码与崩溃（`CrashExit`）都是值，由调用者判断。
+- 标准输入在 `started` 之后写入并关闭写通道，`begin()` 里 `start()` 之后不再访问操作。
+- 停止：先 `terminate()`，宽限期后 `kill()`；kill 定时器以进程为上下文对象，随进程一起消失。
+
+### NetworkClient
+
+```cpp
+auto const client = lqtexec::NetworkClient{gui, manager};
+lexec::spawn(client.get(QNetworkRequest{url}) | lexec::then([](lqtexec::NetworkResponse r) noexcept { ... })
+                 | lexec::upon_error([](lqtexec::NetworkError const &e) noexcept { ... }),
+             scope.get_token());
+```
+
+- 独立的 `lqtexec::network` 目标（Qt::Network）。`NetworkClient` 是调度器与 `QNetworkAccessManager` 的组合，断言两者在同一线程。
+- `get`、`head`、`deleteResource`、`post`、`put`、`send(verb, ...)`，每个 sender 在 start 时才发出请求（惰性，不存在「结束信号在 start 之前已发出」的竞态）；连接信号后若应答已结束，立即处理。
+- 完成签名：`set_value_t(NetworkResponse)`（状态码、最终 URL、响应头、完整的响应体）、`set_error_t(NetworkError)`（含 HTTP 错误的状态码与响应体）、`set_stopped_t()`。响应头名按 Qt 的报告原样给出：Qt 6.7 起为小写。
+- 停止：`abort()`。
+
+## QFuture 互操作
+
+**`from_future(scheduler, future)`**
+
+- 建立在线程亲和框架上：`QFutureWatcher` 住在调度器的线程上，`finished` 之后完成。Qt 5 与 Qt 6 都可用。
+- **完成的判断顺序**：
+  - 先看异常：Qt 在 future 存下异常时会同时把它标为已取消，所以先 `waitForFinished()`，抛出的异常作为 `set_error(std::exception_ptr)`；
+  - 再看是否取消：已取消则 `set_stopped`；
+  - 最后取结果：第一个结果作为值，`QFuture<void>` 没有值，没有结果的 future 以 `set_stopped` 完成。
+- **停止**：只停止等待，不取消 future；同一个 future 可能还有别的观察者。
+
+**`to_future(sndr, token)`**
+
+- 把 sender spawn 进给定的 scope（工作仍属于结构化的 scope），返回 `QFuture<T>`：`T` 是唯一值完成的那个值，没有值则为 `QFuture<void>`。
+- **映射**：
+  - 值 → `reportResult`；
+  - 错误 → future 的异常（Qt 6 保留原异常；Qt 5 只能报告 `QUnhandledException`）；
+  - 停止 → 取消。
+- **scope 不接受工作时**：spawn 直接销毁操作，持有 `QFutureInterface` 的报告者随之析构，把 future 报为已取消并结束，消费方不会永远等待。
+- **取消 future 不停止工作**：与 `QtConcurrent::run` 返回的 future 一样。Qt 没有公开、可与其他 continuation 共存的取消回调（Qt 6 的 continuation 每个 future 只有一个）；停止工作用 scope 的 `request_stop`。
+
+## SignalStop
+
+- POSIX 上把 SIGINT / SIGTERM 变成一次停止请求，做法与 lrclexec 相同：
+  - 构造时在当前线程屏蔽这两个信号，之后创建的线程都继承这个屏蔽；
+  - 一个专门的线程用 `sigtimedwait` 等待信号，不依赖事件循环；排空期间再收到的信号也被吸收，不会结束进程。
+- **约束**：
+  - 要在 `main` 里最先构造，早于 `QCoreApplication` 和任何线程；
+  - 每个进程一个，在构造线程上销毁；
+  - 停止源要活得更久。
+- 与 `exec_with_scope` 组合：信号 → 停止请求 → 排空 → 退出事件循环。
+- 设置失败时：开启异常则抛出；关闭异常则打印原因后 abort。
+
+## 安装与 CMake 包
+
+- `LQTEXEC_INSTALL`（顶层工程默认开启）安装 `lqtexec::lqtexec`、`lqtexec::network`（若构建）、头文件和可搬移的 CMake 包；消费方 `find_package(lqtexec CONFIG REQUIRED)`。
+- **lexec 的来源**：lexec 没有自己的安装规则。
+  - lexec 在本工程里从源码构建时，包里带上当时的 lexec 头文件（`include/lqtexec/vendor`，`LQTEXEC_BUNDLE_LEXEC_HEADERS`），由一个中间 INTERFACE 目标在构建树里链接 `lexec::lexec`、在安装树里指向随包头文件。
+  - 消费方已经提供 `lexec::lexec` 时，包改用它，保证程序里只有一份 lexec。
+  - 随包头文件包含 `<execution>`；配置时检测 libstdc++ 是否以 TBB 实现它，是则链接 `TBB::tbb`。
+- **Qt 依赖**：包按构建时的主版本 `find_dependency(Qt5/Qt6 COMPONENTS Core [Network])`。
+- **开发构建的选项不外泄**：编译选项经 `$<BUILD_INTERFACE:lqtexec_dev>` 只作用于本工程（静态库的私有依赖也会出现在导出里）。
+- **测试**：安装、整体搬走安装目录，再以 `find_package` 构建并运行一个独立的消费工程（两次 `find_package`）；只在不带 sanitizer、开启异常的构建里运行，因为消费工程不带本工程的编译选项。
+
 ## 分配
 
 | 位置 | 分配 |
@@ -266,7 +310,8 @@ int main(int argc, char **argv) {
 | `wait_signal` | 每次 start 一个控制块，加上 Qt 的连接记录与 slot 对象 |
 | `SignalChannel` | 每个通道一次共享状态与两条连接；缓冲按 `std::deque` 增长；`next()` 不分配 |
 | `ThreadPoolScheduler` | 不分配（线程池内部的队列除外） |
-| `run_process` / `NetworkClient` | 跨线程的启动与停止不分配；Qt 对象本身（`QProcess`、`QNetworkReply`）、它们的连接，以及停止进程时的 kill 定时器 |
+| `run_process` / `NetworkClient` / `from_future` | 跨线程的启动与停止不分配；Qt 对象本身（`QProcess`、`QNetworkReply`、`QFutureWatcher`）、它们的连接，以及停止进程时的 kill 定时器 |
+| `to_future` | spawn 的操作、一个报告者（持有 `QFutureInterface`） |
 | `ObjectScope` | 每个对象一次状态，加上守护操作的 spawn |
 | `exec_with_scope` | 收束时一次排队调用 |
 
@@ -303,15 +348,18 @@ lqtexec/
   cmake/          仅用于自身开发构建的选项
   lqtexec/        核心：lqtexec::lqtexec（STATIC，Qt::Core + lexec::lexec）
     include/lqtexec/  EventLoopContext.h EventLoopScheduler.h EventLoopThread.h WaitSignal.h
-                      SignalChannel.h ObjectScope.h ExecWithScope.h ThreadPoolScheduler.h Process.h detail/...
+                      SignalChannel.h ObjectScope.h ExecWithScope.h ThreadPoolScheduler.h Process.h
+                      Future.h SignalStop.h detail/...
     src/
   network/        lqtexec::network（STATIC，Qt::Network）：include/lqtexec/NetworkClient.h
-  tests/          doctest；测试入口先建立 QCoreApplication；network/ 含一个本地 HTTP 测试服务器
+  cmake/          lqtexec_dev.cmake（开发构建）、lqtexec_install.cmake 与 lqtexecConfig.cmake.in（安装）
+  tests/          doctest；测试入口先建立 QCoreApplication；network/ 含一个本地 HTTP 测试服务器；
+                  signal_stop/ 为单独的程序；consumer/ 为安装后的消费工程
   examples/
   docs/
 ```
 
-- **lexec 的提供方**：父项目已有 `lexec::lexec` 时直接使用；否则用 `LQTEXEC_LEXEC_SOURCE_DIR` 指向本地源码；都没有时，用 FetchContent 拉取固定的提交。
+- **lexec 的提供方**：父项目已有 `lexec::lexec` 时直接使用；否则用 `LQTEXEC_LEXEC_SOURCE_DIR` 指向本地源码；都没有时，用 FetchContent 拉取固定的提交。安装时的处理见「安装与 CMake 包」。
 - **Qt 版本选择**：由 `LQTEXEC_QT_MAJOR_VERSION` 决定（5 或 6），留空时优先 Qt 6。
 - **Presets**：GCC 与 Clang 的 debug、asan、tsan，GCC 的 release 与 noexcept，以及 Qt 5 的 `gcc-debug-qt5`、`gcc-noexcept-qt5`、`clang-asan-qt5`。
 

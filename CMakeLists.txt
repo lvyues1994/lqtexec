@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.25)
 project(lqtexec VERSION 0.1.0 LANGUAGES CXX)
 
+include(GNUInstallDirs)
+
 option(LQTEXEC_BUILD_TESTS "Build lqtexec's own tests" ${PROJECT_IS_TOP_LEVEL})
 option(LQTEXEC_BUILD_EXAMPLES "Build lqtexec's examples" ${PROJECT_IS_TOP_LEVEL})
 option(LQTEXEC_BUILD_NETWORK "Build lqtexec::network, which needs Qt Network" ON)
+option(LQTEXEC_INSTALL "Install lqtexec's CMake package" ${PROJECT_IS_TOP_LEVEL})
 set(LQTEXEC_QT_MAJOR_VERSION "" CACHE STRING "Qt major version to build against, 5 or 6; empty prefers Qt 6")
 set_property(CACHE LQTEXEC_QT_MAJOR_VERSION PROPERTY STRINGS "" 5 6)
 set(LQTEXEC_LEXEC_SOURCE_DIR "" CACHE PATH "Local lexec source tree; empty fetches the pinned commit")
@@ -13,18 +16,30 @@ if(LQTEXEC_BUILD_TESTS OR LQTEXEC_BUILD_EXAMPLES)
     include(cmake/lqtexec_dev.cmake)
 endif()
 
+# lexec has no installation of its own: when it is built here from source, the package
+# carries the headers lqtexec was built with.
+set(lqtexec_lexec_include "")
 if(NOT TARGET lexec::lexec)
+    set(LEXEC_BUILD_TESTS OFF CACHE BOOL "Build lexec's own tests")
     if(LQTEXEC_LEXEC_SOURCE_DIR)
-        set(LEXEC_BUILD_TESTS OFF CACHE BOOL "Build lexec's own tests")
         add_subdirectory("${LQTEXEC_LEXEC_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/lexec" EXCLUDE_FROM_ALL)
+        set(lqtexec_lexec_include "${LQTEXEC_LEXEC_SOURCE_DIR}/include")
     else()
         include(FetchContent)
-        set(LEXEC_BUILD_TESTS OFF CACHE BOOL "Build lexec's own tests")
         FetchContent_Declare(lexec
             GIT_REPOSITORY https://github.com/lvyues1994/lexec.git
             GIT_TAG ${LQTEXEC_LEXEC_GIT_TAG})
         FetchContent_MakeAvailable(lexec)
+        set(lqtexec_lexec_include "${lexec_SOURCE_DIR}/include")
     endif()
+endif()
+set(bundle_lexec_default OFF)
+if(lqtexec_lexec_include)
+    set(bundle_lexec_default ON)
+endif()
+option(LQTEXEC_BUNDLE_LEXEC_HEADERS "Install the lexec headers lqtexec was built with" ${bundle_lexec_default})
+if(LQTEXEC_INSTALL AND LQTEXEC_BUNDLE_LEXEC_HEADERS AND NOT lqtexec_lexec_include)
+    message(FATAL_ERROR "Bundling lexec's headers needs lexec built from source here")
 endif()
 
 if(LQTEXEC_QT_MAJOR_VERSION)
@@ -38,12 +53,25 @@ if(TARGET Qt5::Core AND Qt5Core_VERSION VERSION_LESS 5.15)
     message(FATAL_ERROR "lqtexec needs Qt 5.15 or Qt 6; found Qt ${Qt5Core_VERSION}")
 endif()
 
+# Links lexec in the build tree, and the bundled headers or the consumer's lexec once installed.
+add_library(lqtexec_lexec_headers INTERFACE)
+set_target_properties(lqtexec_lexec_headers PROPERTIES EXPORT_NAME lexec_headers)
+target_link_libraries(lqtexec_lexec_headers INTERFACE "$<BUILD_INTERFACE:lexec::lexec>")
+target_compile_features(lqtexec_lexec_headers INTERFACE cxx_std_17)
+if(LQTEXEC_BUNDLE_LEXEC_HEADERS)
+    target_include_directories(lqtexec_lexec_headers INTERFACE
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/lqtexec/vendor>")
+endif()
+
 add_subdirectory(lqtexec)
 if(LQTEXEC_BUILD_NETWORK)
     find_package(${lqtexec_qt} REQUIRED COMPONENTS Network)
     add_subdirectory(network)
 endif()
 
+if(LQTEXEC_INSTALL)
+    include(cmake/lqtexec_install.cmake)
+endif()
 if(LQTEXEC_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)

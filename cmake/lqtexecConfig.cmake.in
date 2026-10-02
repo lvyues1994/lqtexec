@@ -1,0 +1,38 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(@lqtexec_qt@ COMPONENTS @lqtexec_qt_components@)
+if(NOT @LQTEXEC_BUNDLE_LEXEC_HEADERS@ AND NOT TARGET lexec::lexec)
+    find_dependency(lexec CONFIG)
+endif()
+
+if(NOT TARGET lqtexec::lqtexec)
+    include("${CMAKE_CURRENT_LIST_DIR}/lqtexecTargets.cmake")
+
+    # A lexec the consumer already provides takes precedence over the bundled headers, so that
+    # the program has one lexec.
+    if(TARGET lexec::lexec)
+        set_property(TARGET lqtexec::lexec_headers PROPERTY INTERFACE_INCLUDE_DIRECTORIES "")
+        set_property(TARGET lqtexec::lexec_headers PROPERTY INTERFACE_LINK_LIBRARIES lexec::lexec)
+    elseif(@LQTEXEC_BUNDLE_LEXEC_HEADERS@)
+        # The bundled headers include <execution>, which libstdc++ may implement on TBB, as
+        # lexec's own build checks.
+        function(lqtexec_check_execution_backend)
+            set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+            if(NOT CMAKE_CXX_STANDARD)
+                set(CMAKE_CXX_STANDARD 17)
+            endif()
+            include(CheckCXXSourceCompiles)
+            check_cxx_source_compiles(
+                "#include <execution>\n#ifndef _PSTL_PAR_BACKEND_TBB\n#error not TBB\n#endif\nint main() {}"
+                LQTEXEC_STD_EXECUTION_USES_TBB)
+        endfunction()
+        lqtexec_check_execution_backend()
+        if(LQTEXEC_STD_EXECUTION_USES_TBB)
+            find_dependency(TBB CONFIG)
+            set_property(TARGET lqtexec::lexec_headers APPEND PROPERTY INTERFACE_LINK_LIBRARIES TBB::tbb)
+        endif()
+    endif()
+endif()
+
+check_required_components(lqtexec)
