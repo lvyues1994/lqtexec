@@ -1,6 +1,7 @@
 add_library(lqtexec STATIC
     src/EventLoopContext.cpp
-    src/EventLoopThread.cpp)
+    src/EventLoopThread.cpp
+    src/ExecWithScope.cpp)
 add_library(lqtexec::lqtexec ALIAS lqtexec)
 target_include_directories(lqtexec PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
 target_compile_features(lqtexec PUBLIC cxx_std_17)

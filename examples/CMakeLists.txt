@@ -1,0 +1,2 @@
+add_executable(lqtexec_console_demo console_demo.cpp)
+target_link_libraries(lqtexec_console_demo PRIVATE lqtexec::lqtexec lqtexec_dev)
